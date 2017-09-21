@@ -22,7 +22,7 @@ def main():
     orchestrator = Server()
     orchestrator.enable(service)
 
-    socket, server = orchestrator.run(addr='localhost', port=8890)
+    socket, server = orchestrator.run(addr='', port=8890)
     logger.info(f'Serving on {socket.getsockname()}')
     loop.create_task(test())
     loop.run_until_complete(server)
