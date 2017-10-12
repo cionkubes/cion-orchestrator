@@ -4,7 +4,8 @@ import asyncio
 import re
 import rethinkdb as r
 
-from logzero import logger
+from logzero import logger, loglevel
+loglevel(int(os.environ.get("LOGLEVEL", 10)))
 
 from cion_interface.service import service
 from workq.orchestrator import Server
