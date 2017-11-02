@@ -1,4 +1,5 @@
 workq
 cion_interface
+async_rethink
 logzero==1.3.1
 rethinkdb>=1.14

@@ -2,7 +2,7 @@ import os
 import asyncio
 
 import re
-import rethinkdb as r
+from async_rethink import connection
 
 from logzero import logger, loglevel
 loglevel(int(os.environ.get("LOGLEVEL", 10)))
@@ -16,16 +16,13 @@ dispatch = {}
 
 
 async def process_new_image(row):
-    match = service_name.match(row['image-name'])
-    svc = match.group(2).replace('-', '_')
+    image = row['image-name']
 
     logger.debug("Starting new update work task.")
-    result = await service.update(svc, row['image-name'])
+    targets = await service.distribute_to(image)
 
-    if not result:
-        logger.warning(f"Update of {svc} failed.")
-    else:
-        logger.info(f"Update of {svc} succeed.")
+    for swarm, svc in targets:
+        await service.update(swarm, svc, image)
 
 dispatch['new-image'] = process_new_image
 
@@ -34,27 +31,21 @@ async def new_task_watch():
     db_host = os.environ.get('DATABASE_HOST')
     db_port = os.environ.get('DATABASE_PORT')
 
-    await asyncio.sleep(4)  # Allow rethink to start up.
+    conn = await connection(db_host, db_port)
 
-    r.set_loop_type('asyncio')
+    def new_change(change):
+        try:
+            logger.debug(f"Dispatching row: {change}")
+            handler = dispatch[change['event']]
 
-    conn = await r.connect(db_host, db_port)
-    cursor = await r.db('cion').table('tasks').changes().run(conn)
+            asyncio.ensure_future(handler(change))
+        except Exception:
+            logger.exception("Unknown exception in task processing")
 
-    while await cursor.fetch_next():
-        change = await cursor.next()
-
-        logger.debug(f"Change in tasks table: {change}")
-        row = change['new_val']
-
-        # Only process new tasks
-        if change['old_val'] is None and row['status'] == "ready":
-            logger.debug(f"Dispatching row: {row}")
-            handler = dispatch[row['event']]
-
-            asyncio.ensure_future(handler(row))
-
-    conn.close()
+    return conn.observe('tasks')\
+        .filter(lambda c: c['old_val'] is None)\
+        .map(lambda c: c['new_val'])\
+        .subscribe(new_change)
 
 
 def main():
@@ -64,7 +55,7 @@ def main():
 
     socket, server = orchestrator.run(addr='', port=8890)
     logger.info(f'Serving on {socket.getsockname()}')
-    asyncio.ensure_future(new_task_watch(), loop=loop)
+    loop.run_until_complete(new_task_watch())
     loop.run_until_complete(server)
     loop.close()
 
