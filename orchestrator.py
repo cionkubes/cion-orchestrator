@@ -48,11 +48,6 @@ async def new_task_watch():
         .subscribe(new_change)
 
 
-async def stop(server):
-    await asyncio.sleep(10)
-    server.cancel()
-
-
 def main():
     loop = asyncio.get_event_loop()
     orchestrator = Server()
@@ -62,7 +57,6 @@ def main():
     logger.info(f'Serving on {socket.getsockname()}')
     s = asyncio.ensure_future(server)
     loop.run_until_complete(new_task_watch())
-    asyncio.ensure_future(stop(s))
     loop.run_until_complete(s)
     loop.close()
 
