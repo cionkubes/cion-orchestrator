@@ -2,7 +2,7 @@ import os
 import asyncio
 
 import re
-from async_rethink import connection
+from async_rethink import connection, Connection
 
 from logzero import logger, loglevel
 loglevel(int(os.environ.get("LOGLEVEL", 10)))
@@ -15,14 +15,26 @@ service_name = re.compile('^([^/]*/)?[^:]*:([^_]+)')
 dispatch = {}
 
 
-async def process_new_image(row):
-    image = row['image-name']
+async def process_new_image(connection: Connection, row):
+    def set_status(status):
+        return connection.db().table('tasks').get(row['id']).update({'status': status})
 
-    logger.debug("Starting new update work task.")
-    targets = await service.distribute_to(image)
+    await connection.run(set_status('processing'))
+    try:
+        image = row['image-name']
 
-    for swarm, svc in targets:
-        await service.update(swarm, svc, image)
+        logger.debug("Starting new update work task.")
+        targets = await service.distribute_to(image)
+
+        for swarm, svc in targets:
+            await service.update(swarm, svc, image)
+    except:
+        logger.exception("Unknown exception in processing of new image.")
+        await connection.run(set_status('erroneous'))
+        return
+
+    await connection.run(set_status('done'))
+
 
 dispatch['new-image'] = process_new_image
 
@@ -38,7 +50,7 @@ async def new_task_watch():
             logger.debug(f"Dispatching row: {change}")
             handler = dispatch[change['event']]
 
-            asyncio.ensure_future(handler(change))
+            asyncio.ensure_future(handler(conn, change))
         except Exception:
             logger.exception("Unknown exception in task processing")
 
