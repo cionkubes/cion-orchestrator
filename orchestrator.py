@@ -19,7 +19,7 @@ async def process_new_image(connection: Connection, row):
     def set_status(status):
         return connection.db().table('tasks').get(row['id']).update({'status': status})
 
-    await connection.run(set_status('processing'))
+    asyncio.ensure_future(connection.run(set_status('processing')))
     try:
         image = row['image-name']
 
@@ -30,10 +30,10 @@ async def process_new_image(connection: Connection, row):
             await service.update(swarm, svc, image)
     except:
         logger.exception("Unknown exception in processing of new image.")
-        await connection.run(set_status('erroneous'))
+        asyncio.ensure_future(connection.run(set_status('erroneous')))
         return
 
-    await connection.run(set_status('done'))
+    asyncio.ensure_future(connection.run(set_status('done')))
 
 
 dispatch['new-image'] = process_new_image
