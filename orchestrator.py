@@ -1,8 +1,8 @@
+import functools
 import os
 import asyncio
 
-import re
-from async_rethink import connection, Connection
+from async_rethink import connection, Connection, gather
 
 from logzero import logger, loglevel
 loglevel(int(os.environ.get("LOGLEVEL", 10)))
@@ -10,30 +10,34 @@ loglevel(int(os.environ.get("LOGLEVEL", 10)))
 from cion_interface.service import service
 from workq.orchestrator import Server
 
-service_name = re.compile('^([^/]*/)?[^:]*:([^_]+)')
-
 dispatch = {}
 
 
-async def process_new_image(connection: Connection, row):
-    def set_status(status):
-        return connection.db().table('tasks').get(row['id']).update({'status': status})
+def set_status(conn, row, status):
+    return conn.db().table('tasks').get(row['id']).update({'status': status})
 
-    asyncio.ensure_future(connection.run(set_status('processing')))
-    try:
-        image = row['image-name']
 
-        logger.debug("Starting new update work task.")
-        targets = await service.distribute_to(image)
+def handler(handler_fn):
+    @functools.wraps
+    async def wrapper(conn: Connection, row, *args, **kwargs):
+        try:
+            await conn.run(set_status(conn, row, 'processing'))
+            await handler_fn(row, *args, **kwargs)
+            await conn.run(set_status(conn, row, 'done'))
+        except:
+            logger.exception(f"Unknown exception in task handler {handler_fn.__name__}")
+            await conn.run(set_status(conn, row, 'erroneous'))
 
-        for swarm, svc in targets:
-            await service.update(swarm, svc, image)
-    except:
-        logger.exception("Unknown exception in processing of new image.")
-        asyncio.ensure_future(connection.run(set_status('erroneous')))
-        return
+    return wrapper
 
-    asyncio.ensure_future(connection.run(set_status('done')))
+
+@handler
+async def process_new_image(row):
+    image = row['image-name']
+
+    logger.debug("Starting new update work task.")
+    targets = await service.distribute_to(image)
+    await asyncio.gather(service.update(swarm, svc, image) for swarm, svc in targets)
 
 
 dispatch['new-image'] = process_new_image
@@ -50,13 +54,17 @@ async def new_task_watch():
             logger.debug(f"Dispatching row: {change}")
             handler = dispatch[change['event']]
 
-            asyncio.ensure_future(handler(conn, change))
+            asyncio.ensure_future(handler(change))
         except Exception:
             logger.exception("Unknown exception in task processing")
+
+    ready_tasks = conn.run_iter(conn.db().table('tasks').filter(lambda row: row['status'] == 'ready'))
+    unprocessed = await gather(ready_tasks)
 
     return conn.observe('tasks')\
         .filter(lambda c: c['old_val'] is None)\
         .map(lambda c: c['new_val'])\
+        .start_with(*unprocessed)\
         .subscribe(new_change)
 
 
