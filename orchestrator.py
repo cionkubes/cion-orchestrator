@@ -35,6 +35,24 @@ def handler(handler_fn):
 async def process_new_image(row):
     image = row['image-name']
 
+def handler(handler_fn):
+    @functools.wraps(handler_fn)
+    async def wrapper(conn: Connection, row, *args, **kwargs):
+        try:
+            await conn.run(set_status(conn, row, 'processing'))
+            await handler_fn(row, *args, **kwargs)
+            await conn.run(set_status(conn, row, 'done'))
+        except:
+            logger.exception(f"Unknown exception in task handler {handler_fn.__name__}")
+            await conn.run(set_status(conn, row, 'erroneous'))
+
+    return wrapper
+
+
+@handler
+async def process_new_image(row):
+    image = row['image-name']
+
     logger.debug("Starting new update work task.")
     targets = await service.distribute_to(image)
     await asyncio.gather(service.update(swarm, svc, image) for swarm, svc in targets)
@@ -54,7 +72,7 @@ async def new_task_watch():
             logger.debug(f"Dispatching row: {change}")
             handler = dispatch[change['event']]
 
-            asyncio.ensure_future(handler(change))
+            asyncio.ensure_future(handler(conn, change))
         except Exception:
             logger.exception("Unknown exception in task processing")
 
