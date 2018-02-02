@@ -9,38 +9,35 @@ loglevel(int(os.environ.get("LOGLEVEL", 10)))
 
 from cion_interface.service import service
 from workq.orchestrator import Server
+from rethinkdb import r
 
 dispatch = {}
 
 
 def set_status(conn, row, status):
-    return conn.db().table('tasks').get(row['id']).update({'status': status})
+    return conn.db().table('tasks').get(row['id']).update({
+        'status': status,
+        'time': r.now().to_epoch_time()
+    })
 
 
-def handler(handler_fn):
-    @functools.wraps
-    async def wrapper(conn: Connection, row, *args, **kwargs):
-        try:
-            await conn.run(set_status(conn, row, 'processing'))
-            await handler_fn(row, *args, **kwargs)
-            await conn.run(set_status(conn, row, 'done'))
-        except:
-            logger.exception(f"Unknown exception in task handler {handler_fn.__name__}")
-            await conn.run(set_status(conn, row, 'erroneous'))
+def update_service(conn, swarm, service, image):
+    return conn.db().table('tasks').insert({
+        'swarm': swarm,
+        'service': service,
+        'image-name': image,
+        'event': 'service-update',
+        'status': 'ready',
+        'time': r.now().to_epoch_time()
+    })
 
-    return wrapper
-
-
-@handler
-async def process_new_image(row):
-    image = row['image-name']
 
 def handler(handler_fn):
     @functools.wraps(handler_fn)
     async def wrapper(conn: Connection, row, *args, **kwargs):
         try:
             await conn.run(set_status(conn, row, 'processing'))
-            await handler_fn(row, *args, **kwargs)
+            await handler_fn(conn, row, *args, **kwargs)
             await conn.run(set_status(conn, row, 'done'))
         except:
             logger.exception(f"Unknown exception in task handler {handler_fn.__name__}")
@@ -50,13 +47,14 @@ def handler(handler_fn):
 
 
 @handler
-async def process_new_image(row):
+async def process_new_image(conn, row):
     image = row['image-name']
 
     logger.debug("Starting new update work task.")
     targets = await service.distribute_to(image)
-    await asyncio.gather(service.update(swarm, svc, image) for swarm, svc in targets)
-
+    for swarm, svc, image in targets:
+        conn.run(update_service(conn, swarm, svc, image))
+        # await service.update(swarm, svc, image)
 
 dispatch['new-image'] = process_new_image
 
