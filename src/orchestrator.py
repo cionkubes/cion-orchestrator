@@ -2,7 +2,7 @@ import functools
 import os
 import asyncio
 
-from async_rethink import connection, Connection, gather
+from async_rethink import connection, Connection
 
 from logzero import logger, loglevel
 loglevel(int(os.environ.get("LOGLEVEL", 10)))
@@ -12,6 +12,15 @@ from workq.orchestrator import Server
 from rethinkdb import r
 
 dispatch = {}
+
+
+async def gather(async_generator):
+    result = []
+
+    async for element in async_generator:
+        result.append(element)
+
+    return result
 
 
 def set_status(conn, row, status):
@@ -40,7 +49,8 @@ def handler(handler_fn):
             await handler_fn(conn, row, *args, **kwargs)
             await conn.run(set_status(conn, row, 'done'))
         except:
-            logger.exception(f"Unknown exception in task handler {handler_fn.__name__}")
+            logger.exception(
+                f"Unknown exception in task handler {handler_fn.__name__}")
             await conn.run(set_status(conn, row, 'erroneous'))
 
     return wrapper
@@ -74,7 +84,8 @@ async def new_task_watch():
         except Exception:
             logger.exception("Unknown exception in task processing")
 
-    ready_tasks = conn.run_iter(conn.db().table('tasks').filter(lambda row: row['status'] == 'ready'))
+    ready_tasks = conn.run_iter(conn.db().table(
+        'tasks').filter(lambda row: row['status'] == 'ready'))
     unprocessed = await gather(ready_tasks)
 
     return conn.observe('tasks')\

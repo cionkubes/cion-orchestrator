@@ -1,4 +1,4 @@
-workq
-cion_interface
-async_rethink
 logzero==1.3.1
+git+https://github.com/cionkubes/workq
+git+https://github.com/cionkubes/cion-interface
+git+https://github.com/cionkubes/rethink-wrapper@v0.2.2
