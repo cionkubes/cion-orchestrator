@@ -58,15 +58,31 @@ def handler(handler_fn):
 
 @handler
 async def process_new_image(conn, row):
+    logger.debug("Starting new update work task.")
+
     image = row['image-name']
 
-    logger.debug("Starting new update work task.")
     targets = await service.distribute_to(image)
+    logger.debug(f"Distributing to: {targets}")
     for swarm, svc, image in targets:
-        conn.run(update_service(conn, swarm, svc, image))
+        logger.debug(f"Adding update service tasks: {swarm, svc, image}")
+        await conn.run(update_service(conn, swarm, svc, image))
         # await service.update(swarm, svc, image)
 
 dispatch['new-image'] = process_new_image
+
+
+@handler
+async def process_service_update(conn, row):
+    logger.debug("Starting new update work task.")
+
+    swarm = row['swarm']
+    svc = row['service']
+    image = row['image-name']
+
+    await service.update(swarm, svc, image)
+
+dispatch["service-update"] = process_service_update
 
 
 async def new_task_watch():
