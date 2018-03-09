@@ -5,7 +5,7 @@ WORKDIR /opt/orchestrator
 RUN apk --no-cache add git
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt --src /lib
 
 COPY src/orchestrator.py .
 
