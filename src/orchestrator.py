@@ -31,7 +31,7 @@ def set_status(conn, row, status):
 
 
 def update_service(conn, swarm, service, image):
-    return conn.db().table('tasks').update({
+    return conn.db().table('tasks').insert({
         'swarm': swarm,
         'service': service,
         'image-name': image,
