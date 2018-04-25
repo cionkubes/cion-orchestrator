@@ -2,6 +2,8 @@ import functools
 import os
 import asyncio
 
+from aioreactive.operators import concat
+from aioreactive.core import Operators, AsyncAnonymousObserver, subscribe
 from async_rethink import connection, Connection
 
 from logzero import logger, loglevel
@@ -88,24 +90,30 @@ async def new_task_watch():
 
     conn = await connection(db_host, db_port)
 
-    def new_change(change):
+    async def new_change(change):
         try:
             logger.debug(f"Dispatching row: {change}")
             handler = dispatch[change['event']]
 
-            asyncio.ensure_future(handler(conn, change))
+            await handler(conn, change)
+        except KeyError:
+            logger.debug(f"No handler for event type {change['event']}")
         except Exception:
             logger.exception("Unknown exception in task processing")
 
-    ready_tasks = conn.run_iter(conn.db().table(
-        'tasks').filter(lambda row: row['status'] == 'ready'))
-    unprocessed = await gather(ready_tasks)
 
-    return conn.observe('tasks')\
-        .filter(lambda c: c['old_val'] is None)\
-        .map(lambda c: c['new_val'])\
-        .start_with(*unprocessed)\
-        .subscribe(new_change)
+    start_with = conn.observable_query(conn.db().table('tasks') \
+        .filter(lambda row: row['status'] == 'ready')
+    )
+
+    ready_tasks = concat(
+        start_with,
+        conn.observe("tasks")
+            | Operators.map(lambda c: c['new_val'])
+            | Operators.filter(lambda task: task['status'] == "ready")
+    )
+
+    return await subscribe(ready_tasks, AsyncAnonymousObserver(new_change))
 
 
 def main():
