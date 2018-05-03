@@ -1,17 +1,21 @@
 import functools
-import os
 import asyncio
+import os
 
+from collections import defaultdict
+from datetime import timezone, datetime
+
+from rethinkdb import r
 from aioreactive.operators import concat
 from aioreactive.core import Operators, AsyncAnonymousObserver, subscribe
 from async_rethink import connection, Connection
+from async_rethink.reactive import with_latest_from, AsyncRepeatedlyCallWithLatest
 
 from logzero import logger, loglevel
 loglevel(int(os.environ.get("LOGLEVEL", 10)))
 
 from cion_interface.service import service
 from workq.orchestrator import Server
-from rethinkdb import r
 
 dispatch = {}
 
@@ -32,15 +36,25 @@ def set_status(conn, row, status):
     })
 
 
-def update_service(conn, swarm, service, image):
+def new_task(conn, event, task):
     return conn.db().table('tasks').insert({
-        'swarm': swarm,
-        'service': service,
-        'image-name': image,
-        'event': 'service-update',
+        **task,
+        'event': event,
         'status': 'ready',
         'time': r.now().to_epoch_time()
     })
+
+
+def update_service(conn, swarm, service, image):
+    return new_task(conn, "service-update", {
+        'swarm': swarm,
+        'service': service,
+        'image-name': image,
+    })
+
+
+def remove_delayed(conn, task):
+    return conn.db().table('delayed_tasks').get(task['id']).delete()
 
 
 def handler(handler_fn):
@@ -84,36 +98,88 @@ async def process_service_update(conn, row):
 dispatch["service-update"] = process_service_update
 
 
+@handler
+async def process_webhook(conn, row):
+    logger.debug("Starting new update work task.")
+
+    swarm = row['swarm']
+    svc = row['service']
+    image = row['image-name']
+
+    await service.update(swarm, svc, image)
+
+dispatch[""] = process_service_update
+
+
+def group_by(key):
+    def inner(xs):
+        result = defaultdict(list)
+        for x in xs:
+            result[x[key]].append(x)
+
+        return dict(result)
+    return inner
+
+
 async def new_task_watch():
     db_host = os.environ.get('DATABASE_HOST')
     db_port = os.environ.get('DATABASE_PORT')
 
     conn = await connection(db_host, db_port)
 
-    async def new_change(change):
-        try:
-            logger.debug(f"Dispatching row: {change}")
-            handler = dispatch[change['event']]
+    async def new_change(arg):
+        row, webhooks = arg[0], arg[1]
+        logger.debug(f"Dispatching row: {row}")
 
-            await handler(conn, change)
+        event = row['event']
+        hooks = webhooks[event]
+        webhook_future = asyncio.ensure_future(service.webhook(hooks, row))
+
+        try:
+            handler = dispatch[event]
+            await handler(conn, row)
         except KeyError:
-            logger.debug(f"No handler for event type {change['event']}")
+            logger.debug(f"No handler for event type {row['event']}")
         except Exception:
             logger.exception("Unknown exception in task processing")
 
+        try:
+            await webhook_future
+        except Exception:
+            logger.exception("Unknown exception in webhook.")
 
-    start_with = conn.observable_query(conn.db().table('tasks') \
+    async def delayed(tasks):
+        if len(tasks) == 0:
+            await asyncio.sleep(60)
+            return
+
+        task = next(iter(tasks))
+
+        delta = datetime.fromtimestamp(task['at'], timezone.utc) - datetime.now(timezone.utc)
+        await asyncio.sleep(delta.total_seconds())
+
+        await conn.run(new_task(conn, task['event'], task['parameters']))
+        await asyncio.shield(conn.run(remove_delayed(conn, task)))
+
+    ready_tasks = conn.start_with_and_changes(conn.db().table('tasks') \
         .filter(lambda row: row['status'] == 'ready')
-    )
+    )   | Operators.map(lambda c: c['new_val'])\
+        | Operators.filter(lambda x: x is not None)
 
-    ready_tasks = concat(
-        start_with,
-        conn.observe("tasks")
-            | Operators.map(lambda c: c['new_val'])
-            | Operators.filter(lambda task: task['status'] == "ready")
-    )
+    webhooks = conn.changes_accumulate(conn.db().table('webhooks'))\
+        | Operators.map(group_by("event"))
 
-    return await subscribe(ready_tasks, AsyncAnonymousObserver(new_change))
+    return await asyncio.gather(
+        subscribe(
+            ready_tasks | with_latest_from(webhooks),
+            AsyncAnonymousObserver(new_change)
+        ),
+        subscribe(
+            conn.changes_accumulate(conn.db().table('delayed_tasks'))\
+                | Operators.map(lambda tasks: sorted(tasks, key=lambda task: task['at'])),
+            AsyncRepeatedlyCallWithLatest(delayed)
+        )
+    )
 
 
 def main():
@@ -123,8 +189,9 @@ def main():
 
     socket, server = orchestrator.run(addr='', port=8890)
     logger.info(f'Serving on {socket.getsockname()}')
-    loop.run_until_complete(new_task_watch())
+    dispose_of = loop.run_until_complete(new_task_watch())
     loop.run_until_complete(server)
+    loop.run_until_complete(asyncio.gather(*[sub.adispose() for sub in dispose_of]))
     loop.close()
 
 
