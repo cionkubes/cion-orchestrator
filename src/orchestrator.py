@@ -45,9 +45,9 @@ def new_task(conn, event, task):
     })
 
 
-def update_service(conn, swarm, service, image):
+def update_service(conn, environment, service, image):
     return new_task(conn, "service-update", {
-        'swarm': swarm,
+        'environment': environment,
         'service': service,
         'image-name': image,
     })
@@ -89,26 +89,13 @@ dispatch['new-image'] = process_new_image
 async def process_service_update(conn, row):
     logger.debug("Starting new update work task.")
 
-    swarm = row['swarm']
+    environment = row['environment']
     svc = row['service']
     image = row['image-name']
 
-    await service.update(swarm, svc, image)
+    await service.update(environment, svc, image)
 
 dispatch["service-update"] = process_service_update
-
-
-@handler
-async def process_webhook(conn, row):
-    logger.debug("Starting new update work task.")
-
-    swarm = row['swarm']
-    svc = row['service']
-    image = row['image-name']
-
-    await service.update(swarm, svc, image)
-
-dispatch[""] = process_service_update
 
 
 def group_by(key):
@@ -128,25 +115,30 @@ async def new_task_watch():
     conn = await connection(db_host, db_port)
 
     async def new_change(arg):
-        row, webhooks = arg[0], arg[1]
-        logger.debug(f"Dispatching row: {row}")
-
-        event = row['event']
-        hooks = webhooks[event]
-        webhook_future = asyncio.ensure_future(service.webhook(hooks, row))
-
         try:
-            handler = dispatch[event]
-            await handler(conn, row)
-        except KeyError:
-            logger.debug(f"No handler for event type {row['event']}")
-        except Exception:
-            logger.exception("Unknown exception in task processing")
+            row, webhooks = arg[0], arg[1]
+            logger.debug(f"Dispatching row: {row}")
 
-        try:
-            await webhook_future
-        except Exception:
-            logger.exception("Unknown exception in webhook.")
+            event = row.get('event', 'undefined')
+            hooks = webhooks.get(event, [])
+            if len(hooks) > 0:
+                webhook_future = asyncio.ensure_future(service.webhook(hooks, row))
+
+            try:
+                handler = dispatch[event]
+                await handler(conn, row)
+            except KeyError:
+                logger.debug(f"No handler for event type {row['event']}")
+            except:
+                logger.exception("Unknown exception in task processing")
+
+            try:
+                if len(hooks) > 0:
+                    await webhook_future
+            except:
+                logger.exception("Unknown exception in webhook.")
+        except:
+            logger.exception("Unknown exception in task watch.")
 
     async def delayed(tasks):
         if len(tasks) == 0:
@@ -160,6 +152,7 @@ async def new_task_watch():
 
         await conn.run(new_task(conn, task['event'], task['parameters']))
         await asyncio.shield(conn.run(remove_delayed(conn, task)))
+
 
     ready_tasks = conn.start_with_and_changes(conn.db().table('tasks') \
         .filter(lambda row: row['status'] == 'ready')
