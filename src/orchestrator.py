@@ -141,6 +141,8 @@ async def new_task_watch():
             logger.exception("Unknown exception in task watch.")
 
     async def delayed(tasks):
+        logger.debug(f"Got update in delayed tasks: {tasks}")
+
         if len(tasks) == 0:
             await asyncio.sleep(60)
             return
